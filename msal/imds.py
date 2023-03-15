@@ -52,7 +52,7 @@ def _obtain_token_on_azure_vm(http_client, resource, client_id=None):
                 "resource": payload.get("resource"),
                 "token_type": payload.get("token_type", "Bearer"),
                 }
-        return payload  # Typically an error
+        return payload  # Typically an error, but it is undefined in the doc above
     except ValueError:
         logger.debug("IMDS emits unexpected payload: %s", resp.text)
         raise
@@ -123,12 +123,13 @@ class ManagedIdentity(object):
 
     def acquire_token(self, resource):
         access_token_from_cache = None
+        client_id_in_cache = self._client_id or "SYSTEM_ASSIGNED_MANAGED_IDENTITY"
         if self._token_cache:
             matches = self._token_cache.find(
                 self._token_cache.CredentialType.ACCESS_TOKEN,
                 target=[resource],
                 query=dict(
-                    client_id=self._client_id,
+                    client_id=client_id_in_cache,
                     environment=self._instance,
                     realm=self._tenant,
                     home_account_id=None,
@@ -151,7 +152,7 @@ class ManagedIdentity(object):
         result = _obtain_token(self._http_client, resource, client_id=self._client_id)
         if self._token_cache and "access_token" in result:
             self._token_cache.add(dict(
-                client_id=self._client_id,
+                client_id=client_id_in_cache,
                 scope=[resource],
                 token_endpoint="https://{}/{}".format(self._instance, self._tenant),
                 response=result,
