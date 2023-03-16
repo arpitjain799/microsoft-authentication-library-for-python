@@ -34,7 +34,7 @@ class VmTestCase(ManagedIdentityTestCase):
             status_code=200,
             text='{"access_token": "AT", "expires_in": "1234", "resource": "R"}',
         )) as mocked_method:
-            result = app.acquire_token("R")
+            result = app.acquire_token(resource="R")
             mocked_method.assert_called_once()
             self.assertEqual({
                 "access_token": "AT",
@@ -43,7 +43,8 @@ class VmTestCase(ManagedIdentityTestCase):
                 "token_type": "Bearer",
             }, result, "Should obtain a token response")
             self.assertEqual(
-                result["access_token"], app.acquire_token("R").get("access_token"),
+                result["access_token"],
+                app.acquire_token(resource="R").get("access_token"),
                 "Should hit the same token from cache")
             self._test_token_cache(app)
 
@@ -54,7 +55,7 @@ class VmTestCase(ManagedIdentityTestCase):
             status_code=400,
             text=raw_error,
         )) as mocked_method:
-            self.assertEqual(json.loads(raw_error), app.acquire_token("R"))
+            self.assertEqual(json.loads(raw_error), app.acquire_token(resource="R"))
             self.assertEqual({}, app._token_cache._cache)
 
 
@@ -69,7 +70,7 @@ class AppServiceTestCase(ManagedIdentityTestCase):
             status_code=200,
             text='{"access_token": "AT", "expires_on": "%s", "resource": "R"}' % (now + 100),
         )) as mocked_method:
-            result = app.acquire_token("R")
+            result = app.acquire_token(resource="R")
             mocked_method.assert_called_once()
             self.assertEqual({
                 "access_token": "AT",
@@ -78,7 +79,8 @@ class AppServiceTestCase(ManagedIdentityTestCase):
                 "token_type": "Bearer",
             }, result, "Should obtain a token response")
             self.assertEqual(
-                result["access_token"], app.acquire_token("R").get("access_token"),
+                result["access_token"],
+                app.acquire_token(resource="R").get("access_token"),
                 "Should hit the same token from cache")
             self._test_token_cache(app)
 
@@ -92,6 +94,6 @@ class AppServiceTestCase(ManagedIdentityTestCase):
             self.assertEqual({
                 "error": "invalid_scope",
                 "error_description": "500, error content is undefined",
-            }, app.acquire_token("R"))
+            }, app.acquire_token(resource="R"))
             self.assertEqual({}, app._token_cache._cache)
 

@@ -21,15 +21,19 @@ def _scope_to_resource(scope):  # This is an experimental reasonable-effort appr
     return scope  # There is no much else we can do here
 
 
-def _obtain_token(http_client, resource, client_id=None):
+def _obtain_token(http_client, resource, client_id=None, object_id=None, mi_res_id=None):
     if "IDENTITY_ENDPOINT" in os.environ and "IDENTITY_HEADER" in os.environ:
         return _obtain_token_on_app_service(
             http_client, os.environ["IDENTITY_ENDPOINT"], os.environ["IDENTITY_HEADER"],
-            resource, client_id=client_id)
-    return _obtain_token_on_azure_vm(http_client, resource, client_id=client_id)
+            resource, client_id=client_id, object_id=object_id, mi_res_id=mi_res_id)
+    return _obtain_token_on_azure_vm(
+        http_client,
+        resource, client_id=client_id, object_id=object_id, mi_res_id=mi_res_id)
 
 
-def _obtain_token_on_azure_vm(http_client, resource, client_id=None):
+def _obtain_token_on_azure_vm(http_client, resource,
+    client_id=None, object_id=None, mi_res_id=None,
+):
     # Based on https://docs.microsoft.com/en-us/azure/active-directory/managed-identities-azure-resources/how-to-use-vm-token#get-a-token-using-http
     logger.debug("Obtaining token via managed identity on Azure VM")
     params = {
@@ -38,6 +42,10 @@ def _obtain_token_on_azure_vm(http_client, resource, client_id=None):
         }
     if client_id:
         params["client_id"] = client_id
+    if object_id:
+        params["object_id"] = object_id
+    if mi_res_id:
+        params["mi_res_id"] = mi_res_id
     resp = http_client.get(
         "http://169.254.169.254/metadata/identity/oauth2/token",
         params=params,
@@ -57,7 +65,9 @@ def _obtain_token_on_azure_vm(http_client, resource, client_id=None):
         logger.debug("IMDS emits unexpected payload: %s", resp.text)
         raise
 
-def _obtain_token_on_app_service(http_client, endpoint, identity_header, resource, client_id=None):
+def _obtain_token_on_app_service(http_client, endpoint, identity_header, resource,
+    client_id=None, object_id=None, mi_res_id=None,
+):
     """Obtains token for
     `App Service <https://learn.microsoft.com/en-us/azure/app-service/overview-managed-identity?tabs=portal%2Chttp#rest-endpoint-reference>`_
     """
@@ -71,6 +81,10 @@ def _obtain_token_on_app_service(http_client, endpoint, identity_header, resourc
         }
     if client_id:
         params["client_id"] = client_id
+    if object_id:
+        params["object_id"] = object_id
+    if mi_res_id:
+        params["mi_res_id"] = mi_res_id
     resp = http_client.get(
         endpoint,
         params=params,
@@ -103,7 +117,10 @@ def _obtain_token_on_app_service(http_client, endpoint, identity_header, resourc
 class ManagedIdentity(object):
     _instance, _tenant = socket.getfqdn(), "managed_identity"  # Placeholders
 
-    def __init__(self, http_client, client_id=None, token_cache=None):
+    def __init__(self, http_client,
+        client_id=None, object_id=None, mi_res_id=None,
+        token_cache=None,
+    ):
         """Create a managed identity object.
 
         :param http_client:
@@ -117,13 +134,24 @@ class ManagedIdentity(object):
         :param token_cache:
             Optional. It accepts a :class:`msal.TokenCache` instance to store tokens.
         """
+        if len(list(filter(bool, [client_id, object_id, mi_res_id]))) > 1:
+            raise ValueError("You can use up to one of these: client_id, object_id, mi_res_id")
         self._http_client = http_client
         self._client_id = client_id
+        self._object_id = object_id
+        self._mi_res_id = mi_res_id
         self._token_cache = token_cache
 
-    def acquire_token(self, resource):
+    def acquire_token(self, resource=None):
+        if not resource:
+            raise ValueError(
+                "The resource parameter is currently required. "
+                "It is only declared as optional in method signature, "
+                "in case we want to support scope parameter in the future.")
         access_token_from_cache = None
-        client_id_in_cache = self._client_id or "SYSTEM_ASSIGNED_MANAGED_IDENTITY"
+        client_id_in_cache = (
+            self._client_id or self._object_id or self._mi_res_id
+            or "SYSTEM_ASSIGNED_MANAGED_IDENTITY")
         if self._token_cache:
             matches = self._token_cache.find(
                 self._token_cache.CredentialType.ACCESS_TOKEN,
@@ -149,7 +177,13 @@ class ManagedIdentity(object):
                 if "refresh_on" in entry and int(entry["refresh_on"]) < now:  # aging
                     break  # With a fallback in hand, we break here to go refresh
                 return access_token_from_cache  # It is still good as new
-        result = _obtain_token(self._http_client, resource, client_id=self._client_id)
+        result = _obtain_token(
+            self._http_client,
+            resource,
+            client_id=self._client_id,
+            object_id=self._object_id,
+            mi_res_id=self._mi_res_id,
+            )
         if self._token_cache and "access_token" in result:
             self._token_cache.add(dict(
                 client_id=client_id_in_cache,
