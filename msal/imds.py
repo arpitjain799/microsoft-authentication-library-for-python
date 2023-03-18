@@ -22,6 +22,18 @@ def _scope_to_resource(scope):  # This is an experimental reasonable-effort appr
 
 
 def _obtain_token(http_client, resource, client_id=None, object_id=None, mi_res_id=None):
+    if ("IDENTITY_ENDPOINT" in os.environ and "IDENTITY_HEADER" in os.environ
+            and "IDENTITY_SERVER_THUMBPRINT" in os.environ
+    ):
+        if client_id or object_id or mi_res_id:
+            logger.debug(
+                "Ignoring client_id/object_id/mi_res_id. "
+                "Managed Identity in Service Fabric is configured in the cluster, "
+                "not during runtime. See also "
+                "https://learn.microsoft.com/en-us/azure/service-fabric/configure-existing-cluster-enable-managed-identity-token-service")
+        return _obtain_token_on_service_fabric(
+            http_client, os.environ["IDENTITY_ENDPOINT"], os.environ["IDENTITY_HEADER"],
+            os.environ["IDENTITY_SERVER_THUMBPRINT"], resource)
     if "IDENTITY_ENDPOINT" in os.environ and "IDENTITY_HEADER" in os.environ:
         return _obtain_token_on_app_service(
             http_client, os.environ["IDENTITY_ENDPOINT"], os.environ["IDENTITY_HEADER"],
@@ -69,7 +81,8 @@ def _obtain_token_on_app_service(http_client, endpoint, identity_header, resourc
     client_id=None, object_id=None, mi_res_id=None,
 ):
     """Obtains token for
-    `App Service <https://learn.microsoft.com/en-us/azure/app-service/overview-managed-identity?tabs=portal%2Chttp#rest-endpoint-reference>`_
+    `App Service <https://learn.microsoft.com/en-us/azure/app-service/overview-managed-identity?tabs=portal%2Chttp#rest-endpoint-reference>`_,
+    Azure Functions, and Azure Automation.
     """
     # Prerequisite: Create your app service https://docs.microsoft.com/en-us/azure/app-service/quickstart-python
     # Assign it a managed identity https://docs.microsoft.com/en-us/azure/app-service/overview-managed-identity?tabs=portal%2Chttp
@@ -112,6 +125,46 @@ def _obtain_token_on_app_service(http_client, endpoint, identity_header, resourc
     except ValueError:
         logger.debug("IMDS emits unexpected payload: %s", resp.text)
         raise
+
+
+def _obtain_token_on_service_fabric(
+    http_client, endpoint, identity_header, server_thumbprint, resource,
+):
+    """Obtains token for
+    `Service Fabric <https://learn.microsoft.com/en-us/azure/service-fabric/>`_
+    """
+    # Deployment https://learn.microsoft.com/en-us/azure/service-fabric/service-fabric-get-started-containers-linux
+    # See also https://github.com/Azure/azure-sdk-for-python/blob/main/sdk/identity/azure-identity/tests/managed-identity-live/service-fabric/service_fabric.md
+    # Protocol https://learn.microsoft.com/en-us/azure/service-fabric/how-to-managed-identity-service-fabric-app-code#acquiring-an-access-token-using-rest-api
+    logger.debug("Obtaining token via managed identity on Azure Service Fabric")
+    resp = http_client.get(
+        endpoint,
+        params={"api-version": "2019-07-01-preview", "resource": resource},
+        headers={"Secret": identity_header},
+        )
+    try:
+        payload = json.loads(resp.text)
+        if payload.get("access_token") and payload.get("expires_on"):
+            return {  # Normalizing the payload into OAuth2 format
+                "access_token": payload["access_token"],
+                "expires_in": payload["expires_on"] - int(time.time()),
+                "resource": payload.get("resource"),
+                "token_type": payload["token_type"],
+                }
+        error = payload.get("error", {})  # https://learn.microsoft.com/en-us/azure/service-fabric/how-to-managed-identity-service-fabric-app-code#error-handling
+        error_mapping = {  # Map Service Fabric errors into OAuth2 errors  https://www.rfc-editor.org/rfc/rfc6749#section-5.2
+            "SecretHeaderNotFound": "unauthorized_client",
+            "ManagedIdentityNotFound": "invalid_client",
+            "ArgumentNullOrEmpty": "invalid_scope",
+            }
+        return {
+            "error": error_mapping.get(payload["error"]["code"], "invalid_request"),
+            "error_description": resp.text,
+            }
+    except ValueError:
+        logger.debug("IMDS emits unexpected payload: %s", resp.text)
+        raise
+
 
 
 class ManagedIdentity(object):
