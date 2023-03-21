@@ -1,3 +1,4 @@
+# TODO: Change the module name from imds to managed_identity
 # Copyright (c) Microsoft Corporation.
 # All rights reserved.
 #
@@ -11,8 +12,86 @@ try:  # Python 2
     from urlparse import urlparse
 except:  # Python 3
     from urllib.parse import urlparse
+try:  # Python 3
+    from collections import UserDict
+except:
+    UserDict = dict  # The real UserDict is an old-style class which fails super()
+
 
 logger = logging.getLogger(__name__)
+
+class ManagedIdentity(UserDict):
+    # The key names used in config dict
+    ID_TYPE = "ManagedIdentityIdType"
+    ID = "Id"
+    def __init__(self, identifier=None, id_type=None):
+        super(ManagedIdentity, self).__init__({
+            self.ID_TYPE: id_type,
+            self.ID: identifier,
+        })
+
+
+class UserAssignedManagedIdentity(ManagedIdentity):
+    """Feed an instance of this class to :class:`msal.ManagedIdentityClient`
+    to acquire token for user-assigned managed identity.
+
+    By design, an instance of this class is equivalent to a dict in
+    one of these shapes::
+
+        {"ManagedIdentityIdType": "ClientId", "Id": "foo"}
+
+        {"ManagedIdentityIdType": "ResourceId", "Id": "foo"}
+
+        {"ManagedIdentityIdType": "ObjectId", "Id": "foo"}
+
+    so that you may load it from a json configuration file or an env var,
+    and feed it to :class:`Client`.
+    """
+    CLIENT_ID = "ClientId"
+    RESOURCE_ID = "ResourceId"
+    OBJECT_ID = "ObjectId"
+    _types_mapping = {  # Maps type name in configuration to type name on wire
+        CLIENT_ID: "client_id",
+        RESOURCE_ID: "mi_res_id",
+        OBJECT_ID: "object_id",
+    }
+    def __init__(self, identifier, id_type):
+        """Construct a UserAssignedManagedIdentity instance.
+
+        :param string identifier: The id.
+        :param string id_type: It shall be one of these three::
+
+            UserAssignedManagedIdentity.CLIENT_ID
+            UserAssignedManagedIdentity.RESOURCE_ID
+            UserAssignedManagedIdentity.OBJECT_ID
+        """
+        if id_type not in self._types_mapping:
+            raise ValueError("id_type only accepts one of: {}".format(
+                list(self._types_mapping)))
+        super(UserAssignedManagedIdentity, self).__init__(
+            identifier=identifier,
+            id_type=id_type,
+        )
+
+
+class SystemAssignedManagedIdentity(ManagedIdentity):
+    """Feed an instance of this class to :class:`msal.ManagedIdentityClient`
+    to acquire token for system-assigned managed identity.
+
+    By design, an instance of this class is equivalent to::
+
+        {"ManagedIdentityIdType": "SystemAssignedManagedIdentity", "Id": None}
+
+    so that you may load it from a json configuration file or an env var,
+    and feed it to :class:`Client`.
+    """
+    def __init__(self):
+        super(SystemAssignedManagedIdentity, self).__init__(
+            id_type="SystemAssignedManagedIdentity",  # As of this writing,
+                # It can be any value other than
+                # UserAssignedManagedIdentity._types_mapping's key names
+        )
+
 
 def _scope_to_resource(scope):  # This is an experimental reasonable-effort approach
     u = urlparse(scope)
@@ -21,43 +100,47 @@ def _scope_to_resource(scope):  # This is an experimental reasonable-effort appr
     return scope  # There is no much else we can do here
 
 
-def _obtain_token(http_client, resource, client_id=None, object_id=None, mi_res_id=None):
+def _obtain_token(http_client, managed_identity, resource):
     if ("IDENTITY_ENDPOINT" in os.environ and "IDENTITY_HEADER" in os.environ
             and "IDENTITY_SERVER_THUMBPRINT" in os.environ
     ):
-        if client_id or object_id or mi_res_id:
-            logger.debug(
-                "Ignoring client_id/object_id/mi_res_id. "
-                "Managed Identity in Service Fabric is configured in the cluster, "
-                "not during runtime. See also "
-                "https://learn.microsoft.com/en-us/azure/service-fabric/configure-existing-cluster-enable-managed-identity-token-service")
+        logger.debug(
+            "Ignoring client_id/object_id/mi_res_id. "
+            "Managed Identity in Service Fabric is configured in the cluster, "
+            "not during runtime. See also "
+            "https://learn.microsoft.com/en-us/azure/service-fabric/configure-existing-cluster-enable-managed-identity-token-service")
         return _obtain_token_on_service_fabric(
-            http_client, os.environ["IDENTITY_ENDPOINT"], os.environ["IDENTITY_HEADER"],
-            os.environ["IDENTITY_SERVER_THUMBPRINT"], resource)
+            http_client,
+            os.environ["IDENTITY_ENDPOINT"],
+            os.environ["IDENTITY_HEADER"],
+            os.environ["IDENTITY_SERVER_THUMBPRINT"],
+            resource,
+        )
     if "IDENTITY_ENDPOINT" in os.environ and "IDENTITY_HEADER" in os.environ:
         return _obtain_token_on_app_service(
-            http_client, os.environ["IDENTITY_ENDPOINT"], os.environ["IDENTITY_HEADER"],
-            resource, client_id=client_id, object_id=object_id, mi_res_id=mi_res_id)
-    return _obtain_token_on_azure_vm(
-        http_client,
-        resource, client_id=client_id, object_id=object_id, mi_res_id=mi_res_id)
+            http_client,
+            os.environ["IDENTITY_ENDPOINT"],
+            os.environ["IDENTITY_HEADER"],
+            managed_identity,
+            resource,
+        )
+    return _obtain_token_on_azure_vm(http_client, managed_identity, resource)
 
 
-def _obtain_token_on_azure_vm(http_client, resource,
-    client_id=None, object_id=None, mi_res_id=None,
-):
+def _adjust_param(params, managed_identity):
+    id_name = UserAssignedManagedIdentity._types_mapping.get(
+        managed_identity.get(ManagedIdentity.ID_TYPE))
+    if id_name:
+        params[id_name] = managed_identity[ManagedIdentity.ID]
+
+def _obtain_token_on_azure_vm(http_client, managed_identity, resource):
     # Based on https://docs.microsoft.com/en-us/azure/active-directory/managed-identities-azure-resources/how-to-use-vm-token#get-a-token-using-http
     logger.debug("Obtaining token via managed identity on Azure VM")
     params = {
         "api-version": "2018-02-01",
         "resource": resource,
         }
-    if client_id:
-        params["client_id"] = client_id
-    if object_id:
-        params["object_id"] = object_id
-    if mi_res_id:
-        params["mi_res_id"] = mi_res_id
+    _adjust_param(params, managed_identity)
     resp = http_client.get(
         "http://169.254.169.254/metadata/identity/oauth2/token",
         params=params,
@@ -77,8 +160,8 @@ def _obtain_token_on_azure_vm(http_client, resource,
         logger.debug("IMDS emits unexpected payload: %s", resp.text)
         raise
 
-def _obtain_token_on_app_service(http_client, endpoint, identity_header, resource,
-    client_id=None, object_id=None, mi_res_id=None,
+def _obtain_token_on_app_service(
+    http_client, endpoint, identity_header, managed_identity, resource,
 ):
     """Obtains token for
     `App Service <https://learn.microsoft.com/en-us/azure/app-service/overview-managed-identity?tabs=portal%2Chttp#rest-endpoint-reference>`_,
@@ -92,12 +175,7 @@ def _obtain_token_on_app_service(http_client, endpoint, identity_header, resourc
         "api-version": "2019-08-01",
         "resource": resource,
         }
-    if client_id:
-        params["client_id"] = client_id
-    if object_id:
-        params["object_id"] = object_id
-    if mi_res_id:
-        params["mi_res_id"] = mi_res_id
+    _adjust_param(params, managed_identity)
     resp = http_client.get(
         endpoint,
         params=params,
@@ -167,32 +245,24 @@ def _obtain_token_on_service_fabric(
 
 
 
-class ManagedIdentity(object):
+class ManagedIdentityClient(object):
     _instance, _tenant = socket.getfqdn(), "managed_identity"  # Placeholders
 
-    def __init__(self, http_client,
-        client_id=None, object_id=None, mi_res_id=None,
-        token_cache=None,
-    ):
-        """Create a managed identity object.
+    def __init__(self, http_client, managed_identity, token_cache=None):
+        """Create a managed identity client.
 
         :param http_client:
             An http client object. For example, you can use `requests.Session()`.
 
-        :param str client_id:
-            Optional.
-            It accepts the Client ID (NOT the Object ID) of your user-assigned managed identity.
-            If it is None, it means to use a system-assigned managed identity.
+        :param dict managed_identity:
+            It accepts an instance of :class:`SystemAssignedManagedIdentity`
+            or :class:`UserAssignedManagedIdentity`, or their equivalent dict.
 
         :param token_cache:
             Optional. It accepts a :class:`msal.TokenCache` instance to store tokens.
         """
-        if len(list(filter(bool, [client_id, object_id, mi_res_id]))) > 1:
-            raise ValueError("You can use up to one of these: client_id, object_id, mi_res_id")
         self._http_client = http_client
-        self._client_id = client_id
-        self._object_id = object_id
-        self._mi_res_id = mi_res_id
+        self._managed_identity = managed_identity
         self._token_cache = token_cache
 
     def acquire_token(self, resource=None):
@@ -202,9 +272,8 @@ class ManagedIdentity(object):
                 "It is only declared as optional in method signature, "
                 "in case we want to support scope parameter in the future.")
         access_token_from_cache = None
-        client_id_in_cache = (
-            self._client_id or self._object_id or self._mi_res_id
-            or "SYSTEM_ASSIGNED_MANAGED_IDENTITY")
+        client_id_in_cache = self._managed_identity.get(
+            ManagedIdentity.ID, "SYSTEM_ASSIGNED_MANAGED_IDENTITY")
         if self._token_cache:
             matches = self._token_cache.find(
                 self._token_cache.CredentialType.ACCESS_TOKEN,
@@ -230,13 +299,7 @@ class ManagedIdentity(object):
                 if "refresh_on" in entry and int(entry["refresh_on"]) < now:  # aging
                     break  # With a fallback in hand, we break here to go refresh
                 return access_token_from_cache  # It is still good as new
-        result = _obtain_token(
-            self._http_client,
-            resource,
-            client_id=self._client_id,
-            object_id=self._object_id,
-            mi_res_id=self._mi_res_id,
-            )
+        result = _obtain_token(self._http_client, self._managed_identity, resource)
         if self._token_cache and "access_token" in result:
             self._token_cache.add(dict(
                 client_id=client_id_in_cache,

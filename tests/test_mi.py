@@ -9,18 +9,48 @@ except:
 import requests
 
 from tests.http_client import MinimalResponse
-from msal import TokenCache, ManagedIdentity
+from msal import (
+    TokenCache,
+    SystemAssignedManagedIdentity, UserAssignedManagedIdentity, ManagedIdentityClient)
 
 
 class ManagedIdentityTestCase(unittest.TestCase):
+    def test_helper_class_should_be_interchangable_with_dict_which_could_be_loaded_from_file_or_env_var(self):
+        self.assertEqual(
+            UserAssignedManagedIdentity(
+                "foo", id_type=UserAssignedManagedIdentity.CLIENT_ID),
+            {"ManagedIdentityIdType": "ClientId", "Id": "foo"})
+        self.assertEqual(
+            UserAssignedManagedIdentity(
+                "foo", id_type=UserAssignedManagedIdentity.RESOURCE_ID),
+            {"ManagedIdentityIdType": "ResourceId", "Id": "foo"})
+        self.assertEqual(
+            UserAssignedManagedIdentity(
+                "foo", id_type=UserAssignedManagedIdentity.OBJECT_ID),
+            {"ManagedIdentityIdType": "ObjectId", "Id": "foo"})
+        self.assertEqual(
+            SystemAssignedManagedIdentity(),
+            {"ManagedIdentityIdType": "SystemAssignedManagedIdentity", "Id": None})
+
+
+class ClientTestCase(unittest.TestCase):
     maxDiff = None
+
+    def setUp(self):
+        self.app = ManagedIdentityClient(
+            requests.Session(),
+            {   # Here we test it with the raw dict form, to test that
+                # the client has no hard dependency on ManagedIdentity object
+                "ManagedIdentityIdType": "SystemAssignedManagedIdentity", "Id": None,
+            },
+            token_cache=TokenCache())
 
     def _test_token_cache(self, app):
         cache = app._token_cache._cache
         self.assertEqual(1, len(cache.get("AccessToken", [])), "Should have 1 AT")
         at = list(cache["AccessToken"].values())[0]
         self.assertEqual(
-            app._client_id or "SYSTEM_ASSIGNED_MANAGED_IDENTITY",
+            app._managed_identity.get("Id", "SYSTEM_ASSIGNED_MANAGED_IDENTITY"),
             at["client_id"],
             "Should have expected client_id")
         self.assertEqual("managed_identity", at["realm"], "Should have expected realm")
@@ -41,58 +71,56 @@ class ManagedIdentityTestCase(unittest.TestCase):
         self._test_token_cache(app)
 
 
-class VmTestCase(ManagedIdentityTestCase):
+class VmTestCase(ClientTestCase):
 
     def test_happy_path(self):
-        app = ManagedIdentity(requests.Session(), token_cache=TokenCache())
-        with patch.object(app._http_client, "get", return_value=MinimalResponse(
+        with patch.object(self.app._http_client, "get", return_value=MinimalResponse(
             status_code=200,
             text='{"access_token": "AT", "expires_in": "1234", "resource": "R"}',
         )) as mocked_method:
-            self._test_happy_path(app, mocked_method)
+            self._test_happy_path(self.app, mocked_method)
 
     def test_vm_error_should_be_returned_as_is(self):
         raw_error = '{"raw": "error format is undefined"}'
-        app = ManagedIdentity(requests.Session(), token_cache=TokenCache())
-        with patch.object(app._http_client, "get", return_value=MinimalResponse(
+        with patch.object(self.app._http_client, "get", return_value=MinimalResponse(
             status_code=400,
             text=raw_error,
         )) as mocked_method:
-            self.assertEqual(json.loads(raw_error), app.acquire_token(resource="R"))
-            self.assertEqual({}, app._token_cache._cache)
+            self.assertEqual(
+                json.loads(raw_error), self.app.acquire_token(resource="R"))
+            self.assertEqual({}, self.app._token_cache._cache)
 
 
 @patch.dict(os.environ, {"IDENTITY_ENDPOINT": "http://localhost", "IDENTITY_HEADER": "foo"})
-class AppServiceTestCase(ManagedIdentityTestCase):
+class AppServiceTestCase(ClientTestCase):
 
     def test_happy_path(self):
-        app = ManagedIdentity(requests.Session(), token_cache=TokenCache())
-        with patch.object(app._http_client, "get", return_value=MinimalResponse(
+        with patch.object(self.app._http_client, "get", return_value=MinimalResponse(
             status_code=200,
             text='{"access_token": "AT", "expires_on": "%s", "resource": "R"}' % (
                 int(time.time()) + 1234),
         )) as mocked_method:
-            self._test_happy_path(app, mocked_method)
+            self._test_happy_path(self.app, mocked_method)
 
     def test_app_service_error_should_be_normalized(self):
         raw_error = '{"statusCode": 500, "message": "error content is undefined"}'
-        app = ManagedIdentity(requests.Session(), token_cache=TokenCache())
-        with patch.object(app._http_client, "get", return_value=MinimalResponse(
+        with patch.object(self.app._http_client, "get", return_value=MinimalResponse(
             status_code=500,
             text=raw_error,
         )) as mocked_method:
             self.assertEqual({
                 "error": "invalid_scope",
                 "error_description": "500, error content is undefined",
-            }, app.acquire_token(resource="R"))
-            self.assertEqual({}, app._token_cache._cache)
+            }, self.app.acquire_token(resource="R"))
+            self.assertEqual({}, self.app._token_cache._cache)
+
 
 @patch.dict(os.environ, {
     "IDENTITY_ENDPOINT": "http://localhost",
     "IDENTITY_HEADER": "foo",
     "IDENTITY_SERVER_THUMBPRINT": "bar",
 })
-class ServiceFabricTestCase(ManagedIdentityTestCase):
+class ServiceFabricTestCase(ClientTestCase):
 
     def _test_happy_path(self, app):
         with patch.object(app._http_client, "get", return_value=MinimalResponse(
@@ -103,12 +131,13 @@ class ServiceFabricTestCase(ManagedIdentityTestCase):
             super(ServiceFabricTestCase, self)._test_happy_path(app, mocked_method)
 
     def test_happy_path(self):
-        self._test_happy_path(ManagedIdentity(
-            requests.Session(), token_cache=TokenCache()))
+        self._test_happy_path(self.app)
 
     def test_unified_api_service_should_ignore_unnecessary_client_id(self):
-        self._test_happy_path(ManagedIdentity(
-            requests.Session(), client_id="foo", token_cache=TokenCache()))
+        self._test_happy_path(ManagedIdentityClient(
+            requests.Session(),
+            {"ManagedIdentityIdType": "ClientId", "Id": "foo"},
+            token_cache=TokenCache()))
 
     def test_app_service_error_should_be_normalized(self):
         raw_error = '''
@@ -117,14 +146,13 @@ class ServiceFabricTestCase(ManagedIdentityTestCase):
     "code": "SecretHeaderNotFound",
     "message": "Secret is not found in the request headers."
 }}'''  # https://learn.microsoft.com/en-us/azure/service-fabric/how-to-managed-identity-service-fabric-app-code#error-handling
-        app = ManagedIdentity(requests.Session(), token_cache=TokenCache())
-        with patch.object(app._http_client, "get", return_value=MinimalResponse(
+        with patch.object(self.app._http_client, "get", return_value=MinimalResponse(
             status_code=404,
             text=raw_error,
         )) as mocked_method:
             self.assertEqual({
                 "error": "unauthorized_client",
                 "error_description": raw_error,
-            }, app.acquire_token(resource="R"))
-            self.assertEqual({}, app._token_cache._cache)
+            }, self.app.acquire_token(resource="R"))
+            self.assertEqual({}, self.app._token_cache._cache)
 

@@ -161,17 +161,19 @@ def exit(app):
     sys.exit()
 
 def _managed_identity():
-    client_id = _select_options([
-        {"client_id": None, "name": "System-assigned managed identity"},
-        ],
+    mi = _select_options([
+        {
+            'ManagedIdentityIdType': 'SystemAssignedManagedIdentity',
+            "name": "System-assigned managed identity",
+        }],
         option_renderer=lambda a: a["name"],
         header="Choose the system-assigned managed identity "
-            "(or type in your user-assigned managed identity)",
+            "(or type in your user-assigned managed identity's client id)",
         accept_nonempty_string=True)
-    return msal.ManagedIdentity(
+    return msal.ManagedIdentityClient(
         requests.Session(),
-        client_id=client_id["client_id"]
-            if isinstance(client_id, dict) else client_id,
+        mi if isinstance(mi, dict) else msal.UserAssignedManagedIdentity(
+            identifier=mi, id_type=msal.UserAssignedManagedIdentity.CLIENT_ID),
         token_cache=msal.TokenCache(),
     )
 
@@ -218,7 +220,7 @@ def main():
                 acquire_token_by_username_password,
                 remove_account,
             ],
-            msal.ManagedIdentity: [acquire_token_for_managed_identity],
+            msal.ManagedIdentityClient: [acquire_token_for_managed_identity],
         }.items() if isinstance(app, app_type)])
     while True:
         func = _select_options(
