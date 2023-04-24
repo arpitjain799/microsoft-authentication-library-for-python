@@ -17,16 +17,13 @@ from msal import (
 class ManagedIdentityTestCase(unittest.TestCase):
     def test_helper_class_should_be_interchangable_with_dict_which_could_be_loaded_from_file_or_env_var(self):
         self.assertEqual(
-            UserAssignedManagedIdentity(
-                "foo", id_type=UserAssignedManagedIdentity.CLIENT_ID),
+            UserAssignedManagedIdentity.from_client_id("foo"),
             {"ManagedIdentityIdType": "ClientId", "Id": "foo"})
         self.assertEqual(
-            UserAssignedManagedIdentity(
-                "foo", id_type=UserAssignedManagedIdentity.RESOURCE_ID),
+            UserAssignedManagedIdentity.from_resource_id("foo"),
             {"ManagedIdentityIdType": "ResourceId", "Id": "foo"})
         self.assertEqual(
-            UserAssignedManagedIdentity(
-                "foo", id_type=UserAssignedManagedIdentity.OBJECT_ID),
+            UserAssignedManagedIdentity.from_object_id("foo"),
             {"ManagedIdentityIdType": "ObjectId", "Id": "foo"})
         self.assertEqual(
             SystemAssignedManagedIdentity(),

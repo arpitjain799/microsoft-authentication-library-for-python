@@ -34,18 +34,6 @@ class ManagedIdentity(UserDict):
 class UserAssignedManagedIdentity(ManagedIdentity):
     """Feed an instance of this class to :class:`msal.ManagedIdentityClient`
     to acquire token for user-assigned managed identity.
-
-    By design, an instance of this class is equivalent to a dict in
-    one of these shapes::
-
-        {"ManagedIdentityIdType": "ClientId", "Id": "foo"}
-
-        {"ManagedIdentityIdType": "ResourceId", "Id": "foo"}
-
-        {"ManagedIdentityIdType": "ObjectId", "Id": "foo"}
-
-    so that you may load it from a json configuration file or an env var,
-    and feed it to :class:`Client`.
     """
     CLIENT_ID = "ClientId"
     RESOURCE_ID = "ResourceId"
@@ -56,15 +44,7 @@ class UserAssignedManagedIdentity(ManagedIdentity):
         OBJECT_ID: "object_id",
     }
     def __init__(self, identifier, id_type):
-        """Construct a UserAssignedManagedIdentity instance.
-
-        :param string identifier: The id.
-        :param string id_type: It shall be one of these three::
-
-            UserAssignedManagedIdentity.CLIENT_ID
-            UserAssignedManagedIdentity.RESOURCE_ID
-            UserAssignedManagedIdentity.OBJECT_ID
-        """
+        """Do not use this contructor. Use the following factory methods instead."""
         if id_type not in self._types_mapping:
             raise ValueError("id_type only accepts one of: {}".format(
                 list(self._types_mapping)))
@@ -72,6 +52,36 @@ class UserAssignedManagedIdentity(ManagedIdentity):
             identifier=identifier,
             id_type=id_type,
         )
+
+    @classmethod
+    def from_client_id(cls, identifier):
+        """Construct a UserAssignedManagedIdentity instance from a client id.
+
+        The outcome will be equivalent to::
+
+            {"ManagedIdentityIdType": "ClientId", "Id": "foo"}
+        """
+        return UserAssignedManagedIdentity(identifier, cls.CLIENT_ID)
+
+    @classmethod
+    def from_resource_id(cls, identifier):
+        """Construct a UserAssignedManagedIdentity instance from a resource id.
+
+        The outcome will be equivalent to::
+
+            {"ManagedIdentityIdType": "ResourceId", "Id": "foo"}
+        """
+        return UserAssignedManagedIdentity(identifier, cls.RESOURCE_ID)
+
+    @classmethod
+    def from_object_id(cls, identifier):
+        """Construct a UserAssignedManagedIdentity instance from an object id.
+
+        The outcome will be equivalent to::
+
+            {"ManagedIdentityIdType": "ObjectId", "Id": "foo"}
+        """
+        return UserAssignedManagedIdentity(identifier, cls.OBJECT_ID)
 
 
 class SystemAssignedManagedIdentity(ManagedIdentity):
@@ -81,9 +91,6 @@ class SystemAssignedManagedIdentity(ManagedIdentity):
     By design, an instance of this class is equivalent to::
 
         {"ManagedIdentityIdType": "SystemAssignedManagedIdentity", "Id": None}
-
-    so that you may load it from a json configuration file or an env var,
-    and feed it to :class:`Client`.
     """
     def __init__(self):
         super(SystemAssignedManagedIdentity, self).__init__(
@@ -256,16 +263,45 @@ class ManagedIdentityClient(object):
 
         :param dict managed_identity:
             It accepts an instance of :class:`SystemAssignedManagedIdentity`
-            or :class:`UserAssignedManagedIdentity`, or their equivalent dict.
+            or :class:`UserAssignedManagedIdentity`.
+            They are equivalent to a dict with a certain shape,
+            which may be loaded from a json configuration file or an env var,
 
         :param token_cache:
             Optional. It accepts a :class:`msal.TokenCache` instance to store tokens.
+
+        Example: Hard code a managed identity for your app::
+
+            import msal, requests
+            client = msal.ManagedIdentityClient(
+                requests.Session(),
+                msal.UserAssignedManagedIdentity.from_client_id("foo"),
+                )
+
+        Recipe: Write once, run everywhere.
+        If you use different managed identity on different deployment,
+        you may use an environment variable (such as AZURE_MANAGED_IDENTITY)
+        to store something like `{"ManagedIdentityIdType": "ClientId", "Id": "foo"}`
+        or `{"ManagedIdentityIdType": "SystemAssignedManagedIdentity", "Id": null})`.
+        The follow app can load managed identity configuration dynamically::
+
+            import json, os, msal, requests
+            config = os.getenv("AZURE_MANAGED_IDENTITY")
+            assert config, "An ENV VAR with value should exist"
+            client = msal.ManagedIdentityClient(
+                requests.Session(),
+                json.loads(config),
+                )
         """
         self._http_client = http_client
         self._managed_identity = managed_identity
         self._token_cache = token_cache
 
     def acquire_token(self, resource=None):
+        """Acquire token for the managed identity.
+
+        The result will be automatically cached.
+        """
         if not resource:
             raise ValueError(
                 "The resource parameter is currently required. "
